@@ -189,6 +189,14 @@ class Restorer(_CheckpointTracker):
         print('Restoring {}... (strict={})'.format(ckpt_p, strict))
         map_location = None if pe.CUDA_AVAILABLE else 'cpu'
         state_dicts = torch.load(ckpt_p, map_location=map_location)
+
+        # modify the network name for parrallel
+        if torch.cuda.device_count() < 2:
+            network_dict = {}
+            for k,v in state_dicts['net'].items():
+                network_dict[k.replace('.module.', '.')] = v
+            state_dicts['net'] = network_dict
+
         # ---
         for key, m in modules.items():
             # optim implements its own load_state_dict which does not have the `strict` keyword...

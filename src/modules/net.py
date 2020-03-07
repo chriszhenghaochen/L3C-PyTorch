@@ -33,14 +33,21 @@ from dataloaders.images_loader import resize_bicubic_batch
 from modules import edsr
 from modules.quantizer import Quantizer
 
+"""
+in L3C_pt, following name tuples prevent the parallel
 EncOut = namedtuple('EncOut', ['bn',    # NCH'W'
                                'bn_q',  # quantized bn, NCH'W'
                                'S',     # NCH'W', long
                                'L',     # int
-                               'F'      # NCfH'W', float, before Q
+                               'F',     # NCfH'W', float, before Q
                                ])
-DecOut = namedtuple('DecOut', ['F',     # NCfHW
+DecOut = namedtuple('DecOut', ['F',     # NCfHW, actual feature
                                ])
+
+let's change it to pt tensor
+EncOut_bn, EncOut_bn_q, EncOut_S, EncOut_L, EncOut_F, EncOut_H
+DecOut_F, Dec_Out_H
+"""
 
 
 conv = pe.default_conv
@@ -96,6 +103,9 @@ class EDSRLikeEnc(vis.summarizable_module.SummarizableModule):
         kernel_size = config_ms.kernel_size
         C, self.L = config_ms.q.C, config_ms.q.L
 
+        # create this for parallel
+        self.De_L = torch.tensor([self.L], requires_grad = False).to(pe.DEVICE)
+
         n_resblock = config_ms.enc.num_blocks
 
         # Downsampling
@@ -111,11 +121,14 @@ class EDSRLikeEnc(vis.summarizable_module.SummarizableModule):
 
         # to Quantizer
         to_q = [conv(Cf, C, 1)]
-        if self.training:
+
+        # TODO: fix this bug for parallel
+        if self.training and torch.cuda.device_count() == 1:
             to_q.append(
                 # start scale from 1, as 0 is RGB
                 vis.histogram_plot.HistogramPlot('train', 'histo/enc_{}_after_1x1'.format(scale+1), buffer_size=10,
                                                  num_inputs_to_buffer=1, per_channel=False))
+
         self.to_q = nn.Sequential(*to_q)
 
         # We assume q.L levels, evenly distributed between q.levels_range[0] and q.levels_range[1]
@@ -144,8 +157,9 @@ class EDSRLikeEnc(vis.summarizable_module.SummarizableModule):
         x = self.to_q(x)
         # assert self.summarizer is not None
         x_soft, x_hard, symbols_hard = self.q(x)
-        # TODO: To support nn.DataParallel, this must be changed, as it not a tensor
-        return EncOut(x_soft, x_hard, symbols_hard, self.L, F)
+
+        # EncOut_bn, EncOut_bn_q, EncOut_S, EncOut_L, EncOut_F 
+        return x_soft, x_hard, symbols_hard, self.De_L, F
 
 
 class EDSRDec(nn.Module):
@@ -170,17 +184,18 @@ class EDSRDec(nn.Module):
         self.body = nn.Sequential(*m_body)
         self.tail = edsr.Upsampler(conv, 2, Cf, act=False)
 
-    def forward(self, x, features_to_fuse=None):
+    def forward(self, x, features_to_fuse, fuse = False):
         """
         :param x: NCHW
         :return:
         """
         x = self.head(x)
-        if features_to_fuse is not None:
+        if fuse:
             x = x + features_to_fuse
         x = self.body(x) + x
         x = self.tail(x)
-        # TODO: To support nn.DataParallel, this must be changed, as it not a tensor
-        return DecOut(x)
+
+        # DecOut_F
+        return x
 
 

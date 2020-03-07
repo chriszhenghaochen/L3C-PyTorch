@@ -142,7 +142,7 @@ class ImagesCached(object):
         :return:
         """
         self.images_spec = os.path.expanduser(images_spec)
-        self.cache_p = os.path.expanduser(cache_p)
+        self.cache_p = os.path.expanduser(cache_p) if cache_p is not None else None
         self.min_size = min_size
         self.cache = ImagesCached._get_cache(self.cache_p)
 

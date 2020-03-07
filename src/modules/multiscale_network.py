@@ -44,7 +44,7 @@ from criterion.logistic_mixture import DiscretizedMixLogisticLoss
 from modules import edsr
 from helpers.global_config import global_config
 from modules.head import RGBHead, Head
-from modules.net import Net, EncOut
+from modules.net import Net
 from modules.prob_clf import AtrousProbabilityClassifier
 
 
@@ -86,11 +86,11 @@ class Out(object):
         self.auto_recursive_from = auto_recursive_from
         self.targets_style = targets_style
 
-    def append(self, enc_out: EncOut, P, is_training):
-        self.S.append(enc_out.S)
-        self.L.append(enc_out.L)
+    def append(self, enc_out_S, enc_out_L, enc_out_bn, enc_out_bn_q, P, is_training):
+        self.S.append(enc_out_S)
+        self.L.append(enc_out_L)
         self.P.append(P)
-        self.bn.append(enc_out.bn if is_training else enc_out.bn_q)
+        self.bn.append(enc_out_bn if is_training else enc_out_bn_q)
         assert len(self.S) == len(self.L) == len(self.bn) == len(self.P) + 1
 
     def append_input_image(self, x):
@@ -141,6 +141,12 @@ class Losses(vis.summarizable_module.SummarizableModule):
             x_min, x_max = config_ms.q.levels_range
             self.loss_dmol_n = DiscretizedMixLogisticLoss(
                     rgb_scale=False, x_min=x_min, x_max=x_max, L=config_ms.q.L)
+
+        # parallel
+        if torch.cuda.device_count() > 1:
+            print('Using multiple-GPU for Lossless objects')
+            self.loss_dmol_rgb = nn.DataParallel(self.loss_dmol_rgb).to(pe.DEVICE)
+            self.loss_dmol_n = nn.DataParallel(self.loss_dmol_n).to(pe.DEVICE)
 
     def get(self, out: Out):
         """
@@ -217,6 +223,22 @@ class MultiscaleNetwork(vis.summarizable_module.SummarizableModule):
         self.extra_repr_str = 'scales={} / {} nets / {} ps'.format(
                 self.scales, len(self.nets), len(self.prob_clfs))
 
+
+        #----------------------------------multi-GPU parallel------------------------------------#
+        if torch.cuda.device_count() > 1:
+            print('using multi-GPU')
+            for i in range(self.scales):
+                #-------------------------------network-------------------------------#
+                self.heads[i]= nn.DataParallel(self.heads[i]).to(pe.DEVICE)
+                self.nets[i].enc = nn.DataParallel(self.nets[i].enc).to(pe.DEVICE)
+                self.nets[i].dec = nn.DataParallel(self.nets[i].dec).to(pe.DEVICE)
+                self.prob_clfs[i] = nn.DataParallel(self.prob_clfs[i]).to(pe.DEVICE)
+
+            self.sub_rgb_mean = nn.DataParallel(self.sub_rgb_mean).to(pe.DEVICE)
+
+        else:
+            print('using single GPU')
+
     def get_losses(self):
         return Losses(self.config_ms)
 
@@ -245,11 +267,11 @@ class MultiscaleNetwork(vis.summarizable_module.SummarizableModule):
 
         return out
 
-    def get_next_scale_intput(self, previous_enc_out: EncOut):
+    def get_next_scale_intput(self, prev_encout_F, prev_encout_bn):
         if self.config_ms.enc.feed_F:  # set to False for the RGB baselines, where there are no features
-            return previous_enc_out.F
+            return prev_encout_F
         else:
-            return previous_enc_out.bn
+            return prev_encout_bn
 
     def get_Cin_for_scale(self, scale):
         if self.config_ms.enc.feed_F:
@@ -278,9 +300,9 @@ class MultiscaleNetwork(vis.summarizable_module.SummarizableModule):
             head = self.heads[scale]
 
             inp = head(inp)
-            enc_out = net.enc(inp)
+            enc_out = net.enc(inp) # enc_out: EncOut_bn, EncOut_bn_q, EncOut_S, EncOut_L, EncOut_F 
             enc_outs.append(enc_out)
-            inp = self.get_next_scale_intput(enc_out)  # for next scale
+            inp = self.get_next_scale_intput(enc_out[4], enc_out[0])  # for next scale. enc_out[4] = EncOut_F, enc_out[0] = EncOut_bn
 
         dec_outs = []
         for i, scale in reversed(list(enumerate(forward_scales))):  # from coarse to fine
@@ -291,19 +313,23 @@ class MultiscaleNetwork(vis.summarizable_module.SummarizableModule):
             if (not self._fuse_feat or              # disabled
                     scale == -1 or                  # autoregressive scale
                     scale == max(forward_scales)):  # final scale
-                features_to_fuse = None
+                features_to_fuse = torch.zeros(0, requires_grad = False, device=pe.DEVICE)
+                fuse = False
             else:
                 assert len(dec_outs) > 0
-                features_to_fuse = dec_outs[0].F
-
-            dec_inp = enc_out.bn if self.training else enc_out.bn_q
-            dec_out = net.dec(dec_inp, features_to_fuse)
+                features_to_fuse = dec_outs[0]
+                fuse = True
+            
+            dec_inp = enc_out[0] if self.training else enc_out[1] # enc_out[0] = bn, enc_out[1] = bn_q
+            dec_out = net.dec(dec_inp, features_to_fuse, fuse)
             dec_outs.insert(0, dec_out)
 
         for scale, enc_out, dec_out in zip(forward_scales, enc_outs, dec_outs):
             prob_clf = self.prob_clfs[scale]
-            P = prob_clf(dec_out.F)
-            out.append(enc_out, P, self.training)
+            P = prob_clf(dec_out)
+
+            EncOut_bn, EncOut_bn_q, EncOut_S, EncOut_L, EncOut_F = enc_out
+            out.append(EncOut_S, int(EncOut_L.data.cpu().numpy()[0]), EncOut_bn, EncOut_bn_q, P, self.training)
 
     def get_P(self, scale, bn_q, dec_F_prev=None):
         """

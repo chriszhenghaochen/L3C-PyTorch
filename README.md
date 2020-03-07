@@ -11,6 +11,15 @@ _CVPR'19 (oral presentation)_
 </div>
 
 
+### Some Extensions from original repo
+* Add parallel functions
+
+### Todo
+* Enhance speed
+* fix bugs in quantization feature visualization
+* add parallel to demo
+* release model for parallel training
+
 ## [[Paper]](https://arxiv.org/abs/1811.12817) [[Citation]](#citation) [[Oral]](#oral) [[Poster]](#poster) [[FAQ]](#faq)
 
 ### Abstract

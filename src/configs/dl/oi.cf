@@ -5,8 +5,8 @@ crop_size = 128
 max_epochs = None
 
 image_cache_pkl = None
-train_imgs_glob = '/home/zche2021/newproject/others/L3C-PyTorch/data/jpg_train_oi'
-val_glob = '/home/zche2021/newproject/others/L3C-PyTorch/data/jpg_val_oi'
+train_imgs_glob = None
+val_glob = None
 
 val_glob_min_size = None  # for cache_p
 num_val_batches = 5
